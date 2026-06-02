@@ -17,9 +17,9 @@
  *  解锁密钥派生流程：
  *    R (32 bytes)
  *      → HMAC-SHA256(key=R, msg="SHELL-UNLOCK")
- *      → 取前 5 字节
+ *      → 取前 6 字节
  *      → Base64 编码
- *      → 8 字符短密钥（如 "aGJjZGU="）
+ *      → 8 字符短密钥（如 "aGJjZGVm"，无 '=' 填充）
  *
  *  密钥管理：
  *    - 设备端只持有 RSA 公钥（从 PEM 文件加载）
@@ -357,17 +357,25 @@ int func_unlock_generate_challenge(char *b64_out, size_t b64_size) {
         return -1;
     }
 
-    /* ===== Base64 编码密文 → 动态口令 =====
-     * RSA-2048 密文 256 字节 → Base64 约 344 字符（末尾 "=="）
-     * RSA-4096 密文 512 字节 → Base64 约 684 字符（末尾 "="） */
-    int b64_len = func_base64_encode(ciphertext, cipher_len, b64_out, b64_size);
+    /* ===== 拼接版本前缀 + 密文 =====
+     * 在密文前加 1 字节版本前缀，使总长 257 字节 (257%3=2 → Base64 仅 1 个 '=')
+     * 解码时需跳过首字节再进行 RSA 解密 */
+    uint8_t prefixed[UNLOCK_CIPHER_PREFIX_SIZE + UNLOCK_CIPHER_SIZE];
+    prefixed[0] = UNLOCK_CIPHER_PREFIX_VER;
+    memcpy(prefixed + UNLOCK_CIPHER_PREFIX_SIZE, ciphertext, cipher_len);
+
+    /* ===== Base64 编码（版本前缀 + 密文）→ 动态口令 =====
+     * 257 字节 → Base64 约 344 字符（末尾 "="）
+     * 对比原 256 字节 → Base64 约 344 字符（末尾 "=="） */
+    int b64_len = func_base64_encode(prefixed, UNLOCK_CIPHER_PREFIX_SIZE + cipher_len, b64_out, b64_size);
     if (b64_len < 0) {
         fprintf(stderr, "[UNLOCK] base64 encode failed\n");
         return -1;
     }
 
-    /* 安全擦除临时密文 */
+    /* 安全擦除临时密文和前缀缓冲区 */
     secure_erase(ciphertext, sizeof(ciphertext));
+    secure_erase(prefixed, sizeof(prefixed));
 
     return 0;
 }
@@ -415,9 +423,9 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
         return -1;
     }
 
-    /* ===== 步骤 3：取前 5 字节 → Base64 编码 → 8 字符短密钥 =====
-     * 5 字节 → Base64 = 8 字符（含 1 个 '=' 填充）
-     * 短密钥空间 = 2^40 ≈ 1.1 万亿种可能，配合 5 次限制，暴力破解不可行 */
+    /* ===== 步骤 3：取前 6 字节 → Base64 编码 → 8 字符短密钥 =====
+     * 6 字节 → Base64 = 8 字符（6%3=0，无 '=' 填充）
+     * 短密钥空间 = 2^48 ≈ 2.8 万亿种可能，配合 5 次限制，暴力破解不可行 */
     int b64_len = func_base64_encode(mac, UNLOCK_SHORT_KEY_BYTES, key_out, key_size);
 
     /* 安全擦除 MAC 中间值 */

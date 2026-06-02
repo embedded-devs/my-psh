@@ -45,9 +45,10 @@ echo "  挑战码解密"
 echo "============================================"
 echo ""
 
-# ===== Step 1: Base64 解码 + RSA-OAEP 解密 → R =====
+# ===== Step 1: Base64 解码 + 跳过版本前缀 + RSA-OAEP 解密 → R =====
 echo "[1/3] RSA-OAEP 解密中..."
 printf '%s' "$CHALLENGE" | base64 -d 2>/dev/null | \
+    tail -c +2 | \
     openssl pkeyutl -decrypt \
         -inkey "$KEY_FILE" \
         -passin "pass:${KEY_PASS}" \
@@ -74,8 +75,8 @@ if printf '%s' "SHELL-UNLOCK" | \
     openssl dgst -sha256 -mac HMAC -macopt "hexkey:${R_HEX}" -binary \
     > "$TMPDIR/hmac.bin" 2>/dev/null; then
 
-    # Step 3: 取前5字节 → Base64
-    SHORT_KEY=$(head -c 5 "$TMPDIR/hmac.bin" | base64 | tr -d '\n')
+    # Step 3: 取前6字节 → Base64（6%3=0，无 '=' 填充）
+    SHORT_KEY=$(head -c 6 "$TMPDIR/hmac.bin" | base64 | tr -d '\n')
 
 # 方法2: Python3 fallback
 elif command -v python3 &>/dev/null; then
@@ -84,7 +85,7 @@ elif command -v python3 &>/dev/null; then
 import hmac, hashlib, base64, sys
 r = open('${TMPDIR}/R.bin', 'rb').read()
 h = hmac.new(r, b'SHELL-UNLOCK', hashlib.sha256).digest()
-print(base64.b64encode(h[:5]).decode(), end='')
+print(base64.b64encode(h[:6]).decode(), end='')
 ")
     if [ $? -ne 0 ]; then
         echo "错误: HMAC 计算失败"

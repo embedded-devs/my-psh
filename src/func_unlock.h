@@ -8,8 +8,8 @@
  *
  *  解锁流程：
  *  1. 设备开机后生成 32 字节随机数 R（一次生成，重启前不变）
- *  2. 用户输入 debug 命令时，用 RSA-OAEP 公钥加密 R → Base64 编码 → 生成动态口令
- *  3. 管理员在远程用私钥解密得到 R，再派生 8 字符短密钥
+ *  2. 用户输入 debug 命令时，用 RSA-OAEP 公钥加密 R → 加版本前缀 → Base64 编码 → 生成动态口令
+ *  3. 管理员在远程用私钥解密得到 R，再派生 8 字符短密钥（无 '=' 填充）
  *  4. 用户输入短密钥，设备验证后进入调试模式
  *
  *  安全特性：
@@ -40,13 +40,21 @@ extern "C" {
 /** RSA 密文长度（字节），等于密钥字节数 = key_bits / 8 */
 #define UNLOCK_CIPHER_SIZE          (UNLOCK_RSA_KEY_BITS / 8)
 
-/** Base64 编码后动态口令最大长度（含结尾 '\0'） */
-#define UNLOCK_B64_CHALLENGE_SIZE   ((UNLOCK_CIPHER_SIZE + 2) / 3 * 4 + 1)
+/** 密文版本前缀长度（1 字节），使 1+256=257 字节，257%3=2 → Base64 仅有 1 个 '=' */
+#define UNLOCK_CIPHER_PREFIX_SIZE   1
 
-/** 短密钥原始字节数（HMAC-SHA256 前 5 字节） */
-#define UNLOCK_SHORT_KEY_BYTES      5
+/** 密文版本前缀值（0x00），预留未来协议扩展 */
+#define UNLOCK_CIPHER_PREFIX_VER    0x00
 
-/** 短密钥 Base64 编码后长度（5字节 → 8字符，含 '='） */
+/** Base64 编码后动态口令最大长度（含结尾 '\0'）
+ *  密文前加 1 字节版本前缀：1 + 256 = 257 字节，257%3=2 → Base64 末尾 1 个 '='
+ */
+#define UNLOCK_B64_CHALLENGE_SIZE   ((UNLOCK_CIPHER_SIZE + UNLOCK_CIPHER_PREFIX_SIZE + 2) / 3 * 4 + 1)
+
+/** 短密钥原始字节数（HMAC-SHA256 前 6 字节，6%3=0 → Base64 无 '=' 填充） */
+#define UNLOCK_SHORT_KEY_BYTES      6
+
+/** 短密钥 Base64 编码后长度（6字节 → 8字符，无 '=' 填充，含结尾 '\0'） */
 #define UNLOCK_SHORT_KEY_B64_SIZE   9
 
 /** 最大尝试次数 */
@@ -87,10 +95,10 @@ int func_unlock_generate_challenge(char *b64_out, size_t b64_size);
 
 /** @fn int func_unlock_derive_short_key(char *key_out, size_t key_size)
  *  @brief 从 R 派生 8 字符短密钥（管理端模拟）
- *  @param[out] key_out  输出短密钥字符串（如 "aGJjZGU="）
+ *  @param[out] key_out  输出短密钥字符串（如 "aGJjZGVm"，无 '=' 填充）
  *  @param[in]  key_size 输出缓冲区大小（至少 UNLOCK_SHORT_KEY_B64_SIZE）
  *  @return 0 成功，-1 失败
- *  @note  派生算法：HMAC-SHA256(R, "SHELL-UNLOCK") 取前 5 字节 → Base64 编码
+ *  @note  派生算法：HMAC-SHA256(R, "SHELL-UNLOCK") 取前 6 字节 → Base64 编码
  *         此函数仅供管理端模拟测试，实际设备端不暴露此接口
  */
 int func_unlock_derive_short_key(char *key_out, size_t key_size);
