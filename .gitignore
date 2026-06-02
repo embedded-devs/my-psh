@@ -55,7 +55,9 @@ dkms.conf
 bin
 
 *.zip
+*.tar.bz2
 psh
 libs/libqrencode-4.1.1
+libs/mbedtls-4.0.0
 .cache
 compile_commands.json

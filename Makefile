@@ -12,14 +12,19 @@ LIBS_DIR    := $(PROJ_ROOT)/libs
 # ---- 头文件目录 ----
 INC_DIRS :=
 INC_DIRS += $(LIBS_DIR)/libqrencode-4.1.1/_install/include
+INC_DIRS += $(LIBS_DIR)/mbedtls-4.0.0/_install/include
 
 # ---- 库文件目录 ----
 LIB_DIRS :=
 LIB_DIRS += $(LIBS_DIR)/libqrencode-4.1.1/_install/lib
+LIB_DIRS += $(LIBS_DIR)/mbedtls-4.0.0/_install/lib
 
 # ---- 链接库 ----
 LIBS :=
 LIBS += qrencode
+LIBS += mbedtls
+LIBS += mbedx509
+LIBS += mbedcrypto
 LIBS += pthread
 
 # ---- 自动生成编译选项 ----
