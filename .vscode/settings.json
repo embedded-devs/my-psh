@@ -26,5 +26,6 @@
   // 如果找不到任何配置文件，clang-format 会回退使用默认的 LLVM 风格。
   "[c]": {
     "editor.defaultFormatter": "xaver.clang-format" // C文件默认格式化程序
-  }
+},
+"editor.formatOnSave": true
 }

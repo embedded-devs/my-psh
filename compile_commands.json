@@ -1,0 +1,47 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Wall",
+      "-O2",
+      "-I/workspace/libs/libqrencode-4.1.1/_install/include",
+      "-c",
+      "-o",
+      "main.o",
+      "main.c"
+    ],
+    "directory": "/workspace",
+    "file": "/workspace/main.c",
+    "output": "/workspace/main.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Wall",
+      "-O2",
+      "-I/workspace/libs/libqrencode-4.1.1/_install/include",
+      "-c",
+      "-o",
+      "src/func_base64.o",
+      "src/func_base64.c"
+    ],
+    "directory": "/workspace",
+    "file": "/workspace/src/func_base64.c",
+    "output": "/workspace/src/func_base64.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Wall",
+      "-O2",
+      "-I/workspace/libs/libqrencode-4.1.1/_install/include",
+      "-c",
+      "-o",
+      "src/func_qrencode.o",
+      "src/func_qrencode.c"
+    ],
+    "directory": "/workspace",
+    "file": "/workspace/src/func_qrencode.c",
+    "output": "/workspace/src/func_qrencode.o"
+  }
+]
