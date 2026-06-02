@@ -1,0 +1,30 @@
+{
+	// llvm-vs-code-extensions.vscode-clangd
+  "clangd.arguments": [
+    "--log=verbose",
+    "--clang-tidy",
+    "--clang-tidy-checks=cppcoreguidelines-*,performance-*,bugprone-*,portability-*,modernize-*,google-*",
+    "--compile-commands-dir=${workspaceFolder}",
+    "--completion-style=detailed",
+    "--background-index",
+    "-j=16",
+    "--all-scopes-completion",
+    "--header-insertion-decorators",
+    "--header-insertion=never",
+    "--pch-storage=disk",
+    "--function-arg-placeholders=false",
+    "--cross-file-rename",
+    "--enable-config",
+    "--fallback-style=webkit",
+    "--ranking-model=heuristics",
+    "--pretty",
+  ],
+  "clangd.path": "/usr/bin/clangd",
+  // xaver.clang-format
+  "clang-format.executable": "clang-format", // 配置clang-format可执行程序路径
+  "clang-format.style": "file", // 明确告诉 clang-format 使用工程目录中的 .clang-format 文件（从文件目录向上查找）
+  // 如果找不到任何配置文件，clang-format 会回退使用默认的 LLVM 风格。
+  "[c]": {
+    "editor.defaultFormatter": "xaver.clang-format" // C文件默认格式化程序
+  }
+}

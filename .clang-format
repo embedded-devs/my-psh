@@ -1,0 +1,31 @@
+BasedOnStyle: Microsoft # Google|Chromium|Mozilla|WebKit|Microsoft|GNU
+
+# 头文件排序
+SortIncludes: true
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2
+
+# 从switch语句开始，缩进大小写标记一个级别。
+IndentCaseLabels: true
+
+# 使预处理指令（如 #if）与其内部的代码块保持相同的缩进层级。
+IndentPPDirectives: None
+
+# 强制类名与{保持在同一行
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: false      # 
+  AfterNamespace: false  # 命名空间后换行
+  AfterStruct: false
+
+# 对齐c++类中的成员变量
+AlignConsecutiveDeclarations: true
+
+# 命名空间缩进配置
+NamespaceIndentation: All 
+
+# 缩进宽度（如 2、4）
+IndentWidth: 4
