@@ -21,6 +21,9 @@
 extern "C" {
 #endif
 
+/** 最大命令行长度 */
+#define PSH_QRCODE_ENA  0
+
 /** @fn void func_psh_run(void)
  *  @brief 运行 PSH 受保护 Shell 主循环
  *  @note  该函数会阻塞直到用户解锁进入调试模式或退出

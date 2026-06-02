@@ -24,9 +24,6 @@
  * ======================================================
  */
 
-#include "func_psh.h"
-#include "func_unlock.h"
-#include "func_qrencode.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,10 +31,24 @@
 #include <unistd.h>
 #include <time.h>
 
+#include "func_psh.h"
+#include "func_unlock.h"
+
+#if PSH_QRCODE_ENA
+#include "func_qrencode.h"
+#endif
 /* ========== 常量定义 ========== */
 
-/** PSH 版本信息 */
-#define PSH_VERSION     "SM-20250602-n000001"
+/**
+ * PSH 版本信息
+ * 由 Makefile 通过 -DPSH_VERSION="..." 编译选项传入
+ * 格式: SM-<日期>-<提交哈希>-<提交计数>[-dirty]
+ * 示例: SM-20250602-a1b2c3d-n000042-dirty
+ * 若未通过 Makefile 编译（如 IDE 直接编译），使用以下默认值
+ */
+#ifndef PSH_VERSION
+#define PSH_VERSION "SM-unknown-nogit-n000000"
+#endif
 
 /** 最大命令行长度 */
 #define PSH_CMD_MAX_LEN 256
@@ -51,7 +62,7 @@
  *  @brief 打印 PSH 启动横幅信息
  */
 static void psh_print_banner(void) {
-    printf("BusyBox v1.36.1 Protect Shell (psh) ver: %s\n", PSH_VERSION);
+    printf("Protect Shell (psh) ver: %s\n", PSH_VERSION);
     printf("Enter 'help' for a list of davinci system commands.\n");
 }
 
@@ -86,17 +97,22 @@ static void psh_read_line(char *buf, size_t size) {
  *  @param[out] buf  输出缓冲区
  *  @param[in]  size 缓冲区大小
  *  @note  使用 termios 关闭终端回显，输入完成后恢复
+ *         当 stdin 不是终端时（如管道输入），跳过 termios 操作，直接读取
  */
 static void psh_read_password(char *buf, size_t size) {
     struct termios old_term, new_term;
+    int is_tty = isatty(STDIN_FILENO);
 
-    /* 保存原始终端属性 */
-    tcgetattr(STDIN_FILENO, &old_term);
-    new_term = old_term;
+    /* 仅在终端模式下关闭回显 */
+    if (is_tty) {
+        /* 保存原始终端属性 */
+        tcgetattr(STDIN_FILENO, &old_term);
+        new_term = old_term;
 
-    /* 关闭回显标志 */
-    new_term.c_lflag &= ~(ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+        /* 关闭回显标志 */
+        new_term.c_lflag &= ~(ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+    }
 
     /* 读取输入 */
     printf("Password:");
@@ -115,8 +131,10 @@ static void psh_read_password(char *buf, size_t size) {
 
     printf("\n");
 
-    /* 恢复终端回显 */
-    tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+    /* 仅在终端模式下恢复回显 */
+    if (is_tty) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+    }
 }
 
 /** @fn static void psh_cmd_help(void)
@@ -158,8 +176,9 @@ static int psh_cmd_debug(void) {
 
     /* ===== 显示 QR 码 =====
      * 将动态口令编码为 QR 码，管理员可扫码输入解锁工具 */
+#if PSH_QRCODE_ENA
     func_qrencode_generate_and_print(b64_challenge);
-
+#endif
     /* ===== 输出 Base64 文本 =====
      * 同时输出文本格式，方便手动复制 */
     printf("%s\n", b64_challenge);
@@ -178,15 +197,15 @@ static int psh_cmd_debug(void) {
     }
 
     if (result == 1) {
-        /* ===== 解锁成功，进入调试模式 ===== */
-        printf("Enter Debug Mode.\n\n");
+        /* ===== 解锁成功，进入正常Shell ===== */
+        printf("Enter BASH Mode.\n\n");
 
         /* 打印正常 Shell 横幅 */
         time_t     now = time(NULL);
         struct tm *tm_info = localtime(&now);
         char       time_buf[64];
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S %Z", tm_info);
-        printf("BusyBox v1.36.1 (%s) built-in shell (ash)\n\n", time_buf);
+        printf("[%s] Bourne-Again Shell (bash)\n\n", time_buf);
 
         /* 进入调试模式 Shell 循环 */
         while (1) {

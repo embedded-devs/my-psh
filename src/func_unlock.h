@@ -55,10 +55,18 @@ extern "C" {
 /** HMAC 消息常量 */
 #define UNLOCK_HMAC_MSG             "SHELL-UNLOCK"
 
+/** 公钥 PEM 文件默认路径（相对运行目录） */
+#define UNLOCK_PUBKEY_PATH          "keys/public_key.pem"
+
+/** DER 编码公钥最大缓冲区大小（足够 RSA-4096） */
+#define PUBKEY_DER_MAX_SIZE         2048
+
 /** @fn int func_unlock_init(void)
- *  @brief 初始化解锁模块：初始化 PSA Crypto，生成随机数 R 和 RSA 密钥对
+ *  @brief 初始化解锁模块：初始化 PSA Crypto，生成随机数 R，加载 RSA 公钥
  *  @return 0 成功，-1 失败
  *  @note  R 在初始化时生成一次，重启前不变，因此短密钥也不变
+ *         公钥从 UNLOCK_PUBKEY_PATH 指定的 PEM 文件加载，
+ *         可通过环境变量 UNLOCK_PUBKEY_PATH 覆盖默认路径
  */
 int func_unlock_init(void);
 

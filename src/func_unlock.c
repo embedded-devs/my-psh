@@ -3,12 +3,13 @@
  * File name  : func_unlock.c
  * Author     : sumu
  * Date       : 2025/06/02
- * Version    : 1.0
+ * Version    : 2.0
  * Description: RSA 挑战-应答安全解锁模块实现
  *
  *  基于 mbedtls PSA Crypto API 实现：
  *  - psa_generate_random()     生成 32 字节随机数 R
- *  - psa_generate_key()        生成 RSA 密钥对（OAEP/SHA-256）
+ *  - mbedtls_pk_parse_public_key()  从 PEM 文件加载 RSA 公钥
+ *  - psa_import_key()          导入 RSA 公钥到 PSA
  *  - psa_asymmetric_encrypt()  RSA-OAEP 公钥加密
  *  - psa_import_key() +        导入 HMAC 密钥
  *    psa_mac_compute()         计算 HMAC-SHA256
@@ -19,23 +20,32 @@
  *      → 取前 5 字节
  *      → Base64 编码
  *      → 8 字符短密钥（如 "aGJjZGU="）
+ *
+ *  密钥管理：
+ *    - 设备端只持有 RSA 公钥（从 PEM 文件加载）
+ *    - 私钥由管理员离线保管，不在设备端存储
+ *    - 公钥文件由 keys/gen_keys.sh 生成
+ *    - 管理员使用 keys/unlock.sh 解密动态口令
  * ======================================================
  */
 
-#include "func_unlock.h"
-#include "func_base64.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "psa/crypto.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/asn1.h"
+
+#include "func_unlock.h"
+#include "func_base64.h"
 
 /* ========== 模块内部状态 ========== */
 
 /** PSA Crypto 库初始化标志 */
 static int s_psa_initialized = 0;
 
-/** RSA 密钥对 ID（公钥加密 + 私钥解密用） */
+/** RSA 公钥 ID（仅用于公钥加密） */
 static psa_key_id_t s_rsa_key_id = 0;
 
 /** 随机数 R（32 字节，开机时生成一次，重启前不变） */
@@ -57,8 +67,7 @@ static int s_remaining_attempts = UNLOCK_MAX_TRIES;
  *  @return 0 相等，-1 不相等
  *  @note  无论是否匹配，执行时间恒定
  */
-static int constant_time_compare(const uint8_t *a, const uint8_t *b,
-                                 size_t len) {
+static int constant_time_compare(const uint8_t *a, const uint8_t *b, size_t len) {
     uint8_t diff = 0;
     for (size_t i = 0; i < len; i++) {
         diff |= a[i] ^ b[i];
@@ -80,6 +89,171 @@ static void secure_erase(void *data, size_t len) {
     while (len--) {
         *p++ = 0;
     }
+}
+
+/** @fn static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id)
+ *  @brief 从 PEM 文件加载 RSA 公钥到 PSA 密钥槽
+ *  @param[in]  pem_path 公钥 PEM 文件路径
+ *  @param[out] key_id   输出 PSA 密钥 ID
+ *  @return 0 成功，-1 失败
+ *  @note  流程：读取 PEM → mbedtls_pk 解析 → 导出 DER → psa_import_key 导入
+ */
+static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) {
+    int                ret = -1;
+    FILE              *fp = NULL;
+    long               file_size = 0;
+    uint8_t           *pem_buf = NULL;
+    uint8_t           *der_buf = NULL;
+    mbedtls_pk_context pk;
+
+    /* ===== 1. 读取 PEM 文件 ===== */
+    fp = fopen(pem_path, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "[UNLOCK] Cannot open public key: %s\n", pem_path);
+        fprintf(stderr, "[UNLOCK] Please run: keys/gen_keys.sh\n");
+        return -1;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (file_size <= 0) {
+        fprintf(stderr, "[UNLOCK] Invalid public key file size\n");
+        fclose(fp);
+        return -1;
+    }
+
+    pem_buf = (uint8_t *)malloc((size_t)file_size + 1);
+    if (pem_buf == NULL) {
+        fprintf(stderr, "[UNLOCK] malloc failed\n");
+        fclose(fp);
+        return -1;
+    }
+
+    if (fread(pem_buf, 1, (size_t)file_size, fp) != (size_t)file_size) {
+        fprintf(stderr, "[UNLOCK] fread failed\n");
+        fclose(fp);
+        free(pem_buf);
+        return -1;
+    }
+    pem_buf[file_size] = '\0';
+    fclose(fp);
+
+    /* ===== 2. 解析 PEM 格式公钥 ===== */
+    mbedtls_pk_init(&pk);
+    ret = mbedtls_pk_parse_public_key(&pk, pem_buf, (size_t)file_size + 1);
+    if (ret != 0) {
+        fprintf(stderr, "[UNLOCK] mbedtls_pk_parse_public_key failed: -0x%04x\n", (unsigned int)-ret);
+        mbedtls_pk_free(&pk);
+        secure_erase(pem_buf, (size_t)file_size + 1);
+        free(pem_buf);
+        return -1;
+    }
+
+    /* 注意: mbedTLS 4.0.0 不再提供 mbedtls_pk_get_type() 接口
+     * 密钥类型验证由后续 psa_import_key() 保证:
+     * 非 RSA 密钥导入时 psa_import_key() 会返回 PSA_ERROR_INVALID_ARGUMENT */
+
+    /* ===== 3. 导出 DER 格式 ===== */
+    der_buf = (uint8_t *)malloc(PUBKEY_DER_MAX_SIZE);
+    if (der_buf == NULL) {
+        fprintf(stderr, "[UNLOCK] malloc failed\n");
+        mbedtls_pk_free(&pk);
+        secure_erase(pem_buf, (size_t)file_size + 1);
+        free(pem_buf);
+        return -1;
+    }
+
+    int der_len = mbedtls_pk_write_pubkey_der(&pk, der_buf, PUBKEY_DER_MAX_SIZE);
+    mbedtls_pk_free(&pk);
+
+    if (der_len < 0) {
+        fprintf(stderr, "[UNLOCK] mbedtls_pk_write_pubkey_der failed: -0x%04x\n", (unsigned int)-der_len);
+        secure_erase(der_buf, PUBKEY_DER_MAX_SIZE);
+        free(der_buf);
+        secure_erase(pem_buf, (size_t)file_size + 1);
+        free(pem_buf);
+        return -1;
+    }
+
+    /* mbedtls_pk_write_pubkey_der 从缓冲区末尾开始写入 */
+    uint8_t *der_start = der_buf + PUBKEY_DER_MAX_SIZE - der_len;
+
+    /* ===== 3b. 从 SubjectPublicKeyInfo 中提取 RSAPublicKey =====
+     * mbedtls_pk_write_pubkey_der 输出 SubjectPublicKeyInfo 格式:
+     *   SEQUENCE { AlgorithmIdentifier, BIT STRING { RSAPublicKey } }
+     * psa_import_key(PSA_KEY_TYPE_RSA_PUBLIC_KEY) 期望 PKCS#1 RSAPublicKey 格式
+     * 因此需要解析 ASN.1 提取 BIT STRING 中的 RSAPublicKey */
+    uint8_t *rsa_pubkey = NULL;
+    size_t   rsa_pubkey_len = 0;
+    {
+        uint8_t *p = der_start;
+        uint8_t *end = der_start + der_len;
+        size_t   seq_len = 0;
+
+        /* 外层 SEQUENCE */
+        int ret2 = mbedtls_asn1_get_tag(&p, end, &seq_len, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
+        if (ret2 != 0) {
+            fprintf(stderr, "[UNLOCK] ASN1: failed to parse outer SEQUENCE: -0x%04x\n", (unsigned int)-ret2);
+            secure_erase(der_buf, PUBKEY_DER_MAX_SIZE);
+            free(der_buf);
+            secure_erase(pem_buf, (size_t)file_size + 1);
+            free(pem_buf);
+            return -1;
+        }
+
+        /* AlgorithmIdentifier (跳过) */
+        mbedtls_asn1_buf alg_oid;
+        mbedtls_asn1_buf alg_params;
+        ret2 = mbedtls_asn1_get_alg(&p, end, &alg_oid, &alg_params);
+        if (ret2 != 0) {
+            fprintf(stderr, "[UNLOCK] ASN1: failed to parse AlgorithmIdentifier: -0x%04x\n", (unsigned int)-ret2);
+            secure_erase(der_buf, PUBKEY_DER_MAX_SIZE);
+            free(der_buf);
+            secure_erase(pem_buf, (size_t)file_size + 1);
+            free(pem_buf);
+            return -1;
+        }
+
+        /* BIT STRING → 内含 RSAPublicKey */
+        mbedtls_asn1_bitstring bs;
+        memset(&bs, 0, sizeof(bs));
+        ret2 = mbedtls_asn1_get_bitstring(&p, end, &bs);
+        if (ret2 != 0) {
+            fprintf(stderr, "[UNLOCK] ASN1: failed to parse BIT STRING: -0x%04x\n", (unsigned int)-ret2);
+            secure_erase(der_buf, PUBKEY_DER_MAX_SIZE);
+            free(der_buf);
+            secure_erase(pem_buf, (size_t)file_size + 1);
+            free(pem_buf);
+            return -1;
+        }
+
+        /* bs.p 指向 RSAPublicKey 的 DER 编码，bs.len 为字节长度 */
+        rsa_pubkey = bs.p;
+        rsa_pubkey_len = bs.len;
+    }
+
+    /* ===== 4. 导入 PSA 密钥槽 ===== */
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_RSA_PUBLIC_KEY);
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_256));
+
+    psa_status_t status = psa_import_key(&attr, rsa_pubkey, rsa_pubkey_len, key_id);
+
+    /* 安全擦除临时缓冲区 */
+    secure_erase(der_buf, PUBKEY_DER_MAX_SIZE);
+    free(der_buf);
+    secure_erase(pem_buf, (size_t)file_size + 1);
+    free(pem_buf);
+
+    if (status != PSA_SUCCESS) {
+        fprintf(stderr, "[UNLOCK] psa_import_key failed: %d\n", (int)status);
+        return -1;
+    }
+
+    return 0;
 }
 
 /* ========== 公共接口实现 ========== */
@@ -112,21 +286,17 @@ int func_unlock_init(void) {
     }
     s_challenge_ready = 1;
 
-    /* ===== 步骤 3：生成 RSA 密钥对 =====
-     * 设备端只用公钥加密 R（生成动态口令）
+    /* ===== 步骤 3：从 PEM 文件加载 RSA 公钥 =====
+     * 设备端只持有公钥，用于加密 R 生成动态口令
      * 私钥仅在管理端使用（解密动态口令），设备端不保存私钥
-     * 此处生成密钥对仅为演示方便，生产环境中应只部署公钥 */
-    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attr, PSA_KEY_TYPE_RSA_KEY_PAIR);
-    psa_set_key_bits(&attr, UNLOCK_RSA_KEY_BITS);
-    psa_set_key_usage_flags(&attr,
-                            PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
-    /* 使用 RSA-OAEP/SHA-256 填充方案，比 PKCS#1 v1.5 更安全 */
-    psa_set_key_algorithm(&attr, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_256));
+     * 公钥文件由 keys/gen_keys.sh 脚本生成
+     * 可通过环境变量 UNLOCK_PUBKEY_PATH 覆盖默认路径 */
+    const char *pubkey_path = getenv("UNLOCK_PUBKEY_PATH");
+    if (pubkey_path == NULL || pubkey_path[0] == '\0') {
+        pubkey_path = UNLOCK_PUBKEY_PATH;
+    }
 
-    status = psa_generate_key(&attr, &s_rsa_key_id);
-    if (status != PSA_SUCCESS) {
-        fprintf(stderr, "[UNLOCK] psa_generate_key failed: %d\n", status);
+    if (load_public_key_from_pem(pubkey_path, &s_rsa_key_id) != 0) {
         func_unlock_cleanup();
         return -1;
     }
@@ -176,14 +346,11 @@ int func_unlock_generate_challenge(char *b64_out, size_t b64_size) {
      * 输出：密文（UNLOCK_CIPHER_SIZE 字节，RSA-2048 为 256 字节）
      * OAEP 填充保证：即使 R 相同，每次加密结果也不同 */
     uint8_t ciphertext[UNLOCK_CIPHER_SIZE];
-    size_t cipher_len = 0;
+    size_t  cipher_len = 0;
 
-    psa_status_t status = psa_asymmetric_encrypt(
-        s_rsa_key_id,
-        PSA_ALG_RSA_OAEP(PSA_ALG_SHA_256),
-        s_challenge_R, UNLOCK_CHALLENGE_SIZE,
-        NULL, 0, /* OAEP label 为空 */
-        ciphertext, sizeof(ciphertext), &cipher_len);
+    psa_status_t status = psa_asymmetric_encrypt(s_rsa_key_id, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_256), s_challenge_R,
+                                                 UNLOCK_CHALLENGE_SIZE, NULL, 0, /* OAEP label 为空 */
+                                                 ciphertext, sizeof(ciphertext), &cipher_len);
 
     if (status != PSA_SUCCESS) {
         fprintf(stderr, "[UNLOCK] psa_asymmetric_encrypt failed: %d\n", status);
@@ -224,9 +391,7 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
     psa_set_key_algorithm(&hmac_attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
 
     psa_key_id_t hmac_key_id = 0;
-    psa_status_t status = psa_import_key(&hmac_attr,
-                                         s_challenge_R, UNLOCK_CHALLENGE_SIZE,
-                                         &hmac_key_id);
+    psa_status_t status = psa_import_key(&hmac_attr, s_challenge_R, UNLOCK_CHALLENGE_SIZE, &hmac_key_id);
     if (status != PSA_SUCCESS) {
         fprintf(stderr, "[UNLOCK] psa_import_key (HMAC) failed: %d\n", status);
         return -1;
@@ -236,13 +401,10 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
      * R 作为 HMAC 密钥，"SHELL-UNLOCK" 作为消息
      * 输出 32 字节 MAC 值 */
     uint8_t mac[32];
-    size_t mac_len = 0;
+    size_t  mac_len = 0;
 
-    status = psa_mac_compute(hmac_key_id,
-                             PSA_ALG_HMAC(PSA_ALG_SHA_256),
-                             (const uint8_t *)UNLOCK_HMAC_MSG,
-                             strlen(UNLOCK_HMAC_MSG),
-                             mac, sizeof(mac), &mac_len);
+    status = psa_mac_compute(hmac_key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256), (const uint8_t *)UNLOCK_HMAC_MSG,
+                             strlen(UNLOCK_HMAC_MSG), mac, sizeof(mac), &mac_len);
 
     /* 用完立即销毁 HMAC 密钥 */
     psa_destroy_key(hmac_key_id);
@@ -256,8 +418,7 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
     /* ===== 步骤 3：取前 5 字节 → Base64 编码 → 8 字符短密钥 =====
      * 5 字节 → Base64 = 8 字符（含 1 个 '=' 填充）
      * 短密钥空间 = 2^40 ≈ 1.1 万亿种可能，配合 5 次限制，暴力破解不可行 */
-    int b64_len = func_base64_encode(mac, UNLOCK_SHORT_KEY_BYTES,
-                                     key_out, key_size);
+    int b64_len = func_base64_encode(mac, UNLOCK_SHORT_KEY_BYTES, key_out, key_size);
 
     /* 安全擦除 MAC 中间值 */
     secure_erase(mac, sizeof(mac));
@@ -295,10 +456,7 @@ int func_unlock_verify(const char *user_key) {
     }
 
     /* 恒定时间比较，防止时序攻击 */
-    int result = constant_time_compare(
-        (const uint8_t *)user_key,
-        (const uint8_t *)expected_key,
-        strlen(expected_key));
+    int result = constant_time_compare((const uint8_t *)user_key, (const uint8_t *)expected_key, strlen(expected_key));
 
     /* 安全擦除期望密钥 */
     secure_erase(expected_key, sizeof(expected_key));
