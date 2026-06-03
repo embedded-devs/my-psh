@@ -99,6 +99,7 @@ usage() {
     echo -e "./${SCRIPT_NAME} build    : 下载、解压并编译"
     echo -e "./${SCRIPT_NAME} install  : 仅安装(需先编译)"
     echo -e "./${SCRIPT_NAME} clean    : 清理下载的压缩包和解压的源码"
+    echo -e "ARCH=arm ./${SCRIPT_NAME}  : 交叉编译 (arm-linux-gnueabihf-gcc)"
     echo "================================================="
 }
 
@@ -121,6 +122,24 @@ shift $((OPTIND - 1))
 ACTION=${1:-all}
 
 # ========================================================
+# 交叉编译配置
+# ========================================================
+# ARCH=arm 时使用交叉编译工具链，否则使用本地编译
+if [ -n "${ARCH}" ]; then
+    case "${ARCH}" in
+        arm)
+            CROSS_PREFIX=arm-linux-gnueabihf-
+            ;;
+        *)
+            error "Unsupported ARCH=${ARCH}, only 'arm' is supported"
+            exit 1
+            ;;
+    esac
+else
+    CROSS_PREFIX=
+fi
+
+# ========================================================
 # 功能实现
 # ========================================================
 ZIP_NAME=v4.1.1.zip
@@ -135,40 +154,62 @@ DOWNLOAD_LINK=https://github.com/fukuchi/libqrencode/archive/refs/tags/v4.1.1.zi
 check_dependencies() {
     step "checking dependencies..."
 
-    if ! command -v wget &>/dev/null; then
-        warning "wget not found, installing wget..."
-        execute sudo apt-get update
-        execute sudo apt-get install -y wget
+    # 依赖列表: "命令名" 格式，命令名与包名相同
+    local deps=("wget" "unzip" "cmake")
+    local need_update=false
+
+    # 本地编译时额外检查 gcc 和 make
+    if [ -z "${CROSS_PREFIX}" ]; then
+        deps+=("gcc" "make")
     fi
 
-    if ! command -v unzip &>/dev/null; then
-        warning "unzip not found, installing unzip..."
-        execute sudo apt-get install -y unzip
-    fi
+    for dep in "${deps[@]}"; do
+        if ! command -v ${dep} &>/dev/null; then
+            warning "${dep} not found, installing ${dep}..."
+            if [ "${need_update}" = false ]; then
+                execute sudo apt-get update
+                need_update=true
+            fi
+            execute sudo apt-get install -y ${dep}
+        fi
+    done
 
-    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
-        warning "gcc/make not found, installing build-essential..."
-        execute sudo apt-get install -y build-essential
-    fi
-
-    if ! command -v cmake &>/dev/null; then
-        warning "cmake not found, installing cmake..."
-        execute sudo apt-get install -y cmake
+    # 交叉编译模式：检查交叉编译工具链
+    if [ -n "${CROSS_PREFIX}" ]; then
+        if ! command -v ${CROSS_PREFIX}gcc &>/dev/null; then
+            error "cross-compiler ${CROSS_PREFIX}gcc not found, please install it first"
+            exit 1
+        fi
     fi
 }
 
-# 下载源码包
+# 下载并解压源码包
+# 优先级：源码目录已存在 → 压缩包已存在直接解压 → 下载后解压
 do_download_src() {
-   step "start download ${ZIP_NAME}..."
-   if [ ! -f "${ZIP_FILE}" ];then
-      execute wget ${Q} -c ${DOWNLOAD_LINK} -O ${ZIP_FILE}
-   else
-      info "zip file already exists, skip download."
+   step "preparing ${SRC_DIR_NAME} source..."
+
+   # 1. 源码目录已存在，无需下载和解压
+   if [ -d "${SRC_DIR}" ]; then
+      info "source directory already exists, skip download and unpack."
+      success "source ready..."
+      return 0
    fi
-   success "download done..."
+
+   # 2. 压缩包已存在，直接解压
+   if [ -f "${ZIP_FILE}" ]; then
+      info "zip file already exists, unpacking..."
+   else
+      # 3. 压缩包不存在，下载
+      info "downloading ${ZIP_NAME}..."
+      execute wget ${Q} -c ${DOWNLOAD_LINK} -O ${ZIP_FILE}
+   fi
+
+   # 解压
+   execute unzip -q ${ZIP_FILE} -d ${SCRIPT_ABSOLUTE_PATH}
+   success "download and unpack done..."
 }
 
-# 解压源码包到当前目录
+# 解压源码包到当前目录（已由 do_download_src 合并处理，保留接口兼容）
 do_unzip_package() {
     step "start unpacking the ${SRC_DIR_NAME} package ..."
 
@@ -198,10 +239,21 @@ do_build() {
     execute mkdir -p ${BUILD_DIR}
     cdi ${BUILD_DIR}
 
-    execute cmake ${SRC_DIR} \
-        -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
-        -DWITH_TOOLS=NO \
-        -DBUILD_SHARED_LIBS=NO
+    if [ -n "${CROSS_PREFIX}" ]; then
+        info "cross-compiling for ARCH=${ARCH}, using ${CROSS_PREFIX}gcc"
+        execute cmake ${SRC_DIR} \
+            -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
+            -DWITH_TOOLS=NO \
+            -DBUILD_SHARED_LIBS=NO \
+            -DCMAKE_C_COMPILER=${CROSS_PREFIX}gcc \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=arm
+    else
+        execute cmake ${SRC_DIR} \
+            -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
+            -DWITH_TOOLS=NO \
+            -DBUILD_SHARED_LIBS=NO
+    fi
     execute make -j$(nproc)
 
     cdo
@@ -245,6 +297,7 @@ do_echo_menu() {
     echo -e "SCRIPT_CURRENT_PATH :${SCRIPT_CURRENT_PATH}"
     echo -e "SCRIPT_ABSOLUTE_PATH:${SCRIPT_ABSOLUTE_PATH}"
     echo -e "INSTALL_PREFIX      :${INSTALL_PREFIX}"
+    echo -e "CROSS_PREFIX        :${CROSS_PREFIX:-local}"
     echo -e "SHELL_PARAM         :($# total) arg=$*"
 	echo ""
 	echo "================================================="
@@ -255,13 +308,11 @@ check_dependencies
 case "${ACTION}" in
     all)
         do_download_src
-        do_unzip_package
         do_build
         do_install
         ;;
     download)
         do_download_src
-        do_unzip_package
         ;;
     build)
         do_build

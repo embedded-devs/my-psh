@@ -1,10 +1,35 @@
 # =====================================================
 # Makefile for psh_demo2
+#
+# 用法:
+#   make              # 本地编译 (gcc)
+#   make ARCH=arm     # 交叉编译 (arm-linux-gnueabihf-gcc)
+#   make clean        # 清理构建产物
 # =====================================================
 
-CC      := gcc
+# ---- 目标架构 ----
+# ARCH=arm 时使用交叉编译工具链，否则使用本地 gcc
+ifdef ARCH
+  ifeq ($(ARCH),arm)
+    CROSS_PREFIX := arm-linux-gnueabihf-
+  else
+    $(error Unsupported ARCH=$(ARCH), only 'arm' is supported)
+  endif
+else
+  CROSS_PREFIX :=
+endif
+
+CC      := $(CROSS_PREFIX)gcc
+AR      := $(CROSS_PREFIX)ar
+RANLIB  := $(CROSS_PREFIX)ranlib
 CFLAGS  := -Wall -O2
-LDFLAGS :=
+
+# 交叉编译时静态链接，避免目标机 glibc 版本不匹配
+ifneq ($(CROSS_PREFIX),)
+  LDFLAGS := -static
+else
+  LDFLAGS :=
+endif
 
 # ---- Git 版本信息 ----
 # 获取 git 提交哈希（短格式）、提交日期、提交计数、分支名、是否脏（有未提交修改）

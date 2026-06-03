@@ -1,11 +1,20 @@
 #!/bin/bash
 # * =====================================================
 # * Copyright © hk. 2022-2025. All rights reserved.
-# * File name  : libs.sh
+# * File name  : build.sh
 # * Author     : 苏木
 # * Date       : 2024-11-02
-# * Description: 批量下载、编译并安装依赖库
+# * Description: 统一构建脚本 — 依赖库下载编译 + psh 编译
 # *
+# * 用法:
+# *   ./build.sh              构建依赖库并编译 psh
+# *   ./build.sh libs         仅构建依赖库(下载、编译、安装)
+# *   ./build.sh build        仅编译 psh (调用 Makefile)
+# *   ./build.sh clean        清理 psh 构建产物
+# *   ./build.sh -l mbedtls   仅构建指定库(逗号分隔, 如 -l mbedtls,qrencode)
+# *   ARCH=arm ./build.sh     交叉编译 (arm-linux-gnueabihf-gcc)
+# *   ARCH=arm ./build.sh libs   交叉编译仅构建依赖库
+# *   ARCH=arm ./build.sh build  交叉编译仅编译 psh
 # * ======================================================
 ##
 # 脚本和工程路径
@@ -13,7 +22,7 @@
 SCRIPT_NAME=${0#*/}
 SCRIPT_CURRENT_PATH=${0%/*}
 SCRIPT_ABSOLUTE_PATH=`cd $(dirname ${0}); pwd`
-PROJECT_ROOT=${SCRIPT_ABSOLUTE_PATH}/..
+PROJECT_ROOT=${SCRIPT_ABSOLUTE_PATH}
 
 # 颜色和日志标识
 # ========================================================
@@ -73,16 +82,15 @@ cdo() {
 # ========================================================
 # 参数与模式
 # ========================================================
-EXECUTE_MODE=release
 usage() {
     echo "================================================="
-    echo -e "./${SCRIPT_NAME}          : 下载、编译并安装所有库"
+    echo -e "./${SCRIPT_NAME}          : 构建依赖库并编译 psh"
     echo -e "./${SCRIPT_NAME} -h       : 显示帮助信息"
     echo -e "./${SCRIPT_NAME} -l libs  : 仅构建指定库(逗号分隔, 可选: mbedtls,qrencode)"
-    echo -e "./${SCRIPT_NAME} download : 仅下载"
-    echo -e "./${SCRIPT_NAME} build    : 编译"
-    echo -e "./${SCRIPT_NAME} install  : 安装"
-    echo -e "./${SCRIPT_NAME} clean    : 清理构建产物"
+    echo -e "./${SCRIPT_NAME} libs     : 仅构建依赖库"
+    echo -e "./${SCRIPT_NAME} build    : 仅编译 psh (调用 Makefile)"
+    echo -e "./${SCRIPT_NAME} clean    : 清理 psh 构建产物"
+    echo -e "ARCH=arm ./${SCRIPT_NAME}  : 交叉编译 (arm-linux-gnueabihf-gcc)"
     echo "================================================="
 }
 
@@ -118,42 +126,105 @@ ACTION=${1:-all}
 TARGET_LIBS=${TARGET_LIBS:-${LIBS[@]}}
 
 # ========================================================
+# 交叉编译配置
+# ========================================================
+if [ -n "${ARCH}" ]; then
+    case "${ARCH}" in
+        arm)
+            CROSS_PREFIX=arm-linux-gnueabihf-
+            MAKE_ARCH="ARCH=arm"
+            ;;
+        *)
+            error "Unsupported ARCH=${ARCH}, only 'arm' is supported"
+            exit 1
+            ;;
+    esac
+else
+    CROSS_PREFIX=
+    MAKE_ARCH=
+fi
+
+# ========================================================
 # 功能实现
 # ========================================================
+LIBS_DIR=${PROJECT_ROOT}/libs
 
 # 构建单个库
 do_build_lib() {
     local lib=$1
-    local script="${SCRIPT_ABSOLUTE_PATH}/${lib}.sh"
+    local script="${LIBS_DIR}/${lib}.sh"
 
     if [ ! -f "${script}" ]; then
         error "script not found: ${script}"
         return 1
     fi
 
-    step "[${lib}] start ${ACTION}..."
+    step "[${lib}] start building..."
 
-    if [ "${ACTION}" = "all" ]; then
-        execute bash "${script}" download
-        execute bash "${script}" build
-        execute bash "${script}" install
+    # 传递 ARCH 环境变量给子脚本
+    execute env ARCH="${ARCH}" bash "${script}"
+
+    success "[${lib}] done..."
+}
+
+# 构建所有依赖库
+do_libs() {
+    step "building dependency libraries..."
+
+    FAILED=()
+    for lib in ${TARGET_LIBS}; do
+        if ! do_build_lib "${lib}"; then
+            FAILED+=("${lib}")
+        fi
+    done
+
+    echo ""
+    echo "================================================="
+    if [ ${#FAILED[@]} -eq 0 ]; then
+        success "all libs done: ${TARGET_LIBS}"
     else
-        execute bash "${script}" "${ACTION}"
+        error "failed libs: ${FAILED[*]}"
+        return 1
     fi
+}
 
-    success "[${lib}] ${ACTION} done..."
+# 编译 psh（调用 Makefile）
+do_build_psh() {
+    step "building psh (make ${MAKE_ARCH})..."
+
+    cdi ${PROJECT_ROOT}
+    execute make ${MAKE_ARCH}
+    cdo
+
+    if [ -f "${PROJECT_ROOT}/psh" ]; then
+        success "psh binary ready: ${PROJECT_ROOT}/psh"
+    else
+        error "psh binary not found after build"
+        return 1
+    fi
+}
+
+# 清理 psh 构建产物
+do_clean_psh() {
+    step "cleaning psh build artifacts..."
+
+    cdi ${PROJECT_ROOT}
+    execute make ${MAKE_ARCH} clean
+    cdo
+
+    success "psh clean done..."
 }
 
 # 打印菜单
 do_echo_menu() {
     echo "================================================="
-    echo -e "               libs batch installer "
+    echo -e "               psh build script "
     echo "================================================="
     echo -e "current path        :$(pwd)"
-    echo -e "SCRIPT_CURRENT_PATH :${SCRIPT_CURRENT_PATH}"
-    echo -e "SCRIPT_ABSOLUTE_PATH:${SCRIPT_ABSOLUTE_PATH}"
+    echo -e "PROJECT_ROOT        :${PROJECT_ROOT}"
     echo -e "TARGET_LIBS         :${TARGET_LIBS}"
     echo -e "ACTION              :${ACTION}"
+    echo -e "CROSS_PREFIX        :${CROSS_PREFIX:-local}"
     echo -e "SHELL_PARAM         :($# total) arg=$*"
     echo ""
     echo "================================================="
@@ -162,22 +233,18 @@ do_echo_menu() {
 do_echo_menu
 
 case "${ACTION}" in
-    all|download|build|install|clean)
-        FAILED=()
-        for lib in ${TARGET_LIBS}; do
-            if ! do_build_lib "${lib}"; then
-                FAILED+=("${lib}")
-            fi
-        done
-
-        echo ""
-        echo "================================================="
-        if [ ${#FAILED[@]} -eq 0 ]; then
-            success "all done: ${TARGET_LIBS}"
-        else
-            error "failed: ${FAILED[*]}"
-            exit 1
-        fi
+    all)
+        do_libs
+        do_build_psh
+        ;;
+    libs)
+        do_libs
+        ;;
+    build)
+        do_build_psh
+        ;;
+    clean)
+        do_clean_psh
         ;;
     *)
         error "unknown action: ${ACTION}"

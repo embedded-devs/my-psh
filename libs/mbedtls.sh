@@ -99,6 +99,7 @@ usage() {
     echo -e "./${SCRIPT_NAME} build    : 下载、解压并编译"
     echo -e "./${SCRIPT_NAME} install  : 仅安装(需先编译)"
     echo -e "./${SCRIPT_NAME} clean    : 清理构建产物"
+    echo -e "ARCH=arm ./${SCRIPT_NAME}  : 交叉编译 (arm-linux-gnueabihf-gcc)"
     echo "================================================="
 }
 
@@ -121,6 +122,24 @@ shift $((OPTIND - 1))
 ACTION=${1:-all}
 
 # ========================================================
+# 交叉编译配置
+# ========================================================
+# ARCH=arm 时使用交叉编译工具链，否则使用本地编译
+if [ -n "${ARCH}" ]; then
+    case "${ARCH}" in
+        arm)
+            CROSS_PREFIX=arm-linux-gnueabihf-
+            ;;
+        *)
+            error "Unsupported ARCH=${ARCH}, only 'arm' is supported"
+            exit 1
+            ;;
+    esac
+else
+    CROSS_PREFIX=
+fi
+
+# ========================================================
 # 功能实现
 # ========================================================
 TAR_NAME=mbedtls-4.0.0.tar.bz2
@@ -136,8 +155,13 @@ check_dependencies() {
     step "checking dependencies..."
 
     # 依赖列表: "命令名:包名" 格式，包名缺省时与命令名相同
-    local deps=("wget" "tar" "cmake" "make" "gcc" "bzip2")
+    local deps=("wget" "tar" "cmake" "bzip2")
     local need_update=false
+
+    # 本地编译时额外检查 gcc 和 make
+    if [ -z "${CROSS_PREFIX}" ]; then
+        deps+=("gcc" "make")
+    fi
 
     for dep in "${deps[@]}"; do
         if ! command -v ${dep} &>/dev/null; then
@@ -149,20 +173,43 @@ check_dependencies() {
             execute sudo apt-get install -y ${dep}
         fi
     done
+
+    # 交叉编译模式：检查交叉编译工具链
+    if [ -n "${CROSS_PREFIX}" ]; then
+        if ! command -v ${CROSS_PREFIX}gcc &>/dev/null; then
+            error "cross-compiler ${CROSS_PREFIX}gcc not found, please install it first"
+            exit 1
+        fi
+    fi
 }
 
-# 下载源码包
+# 下载并解压源码包
+# 优先级：源码目录已存在 → 压缩包已存在直接解压 → 下载后解压
 do_download_src() {
-   step "start download ${TAR_NAME}..."
-   if [ ! -f "${TAR_FILE}" ];then
-      execute wget ${Q} -c ${DOWNLOAD_LINK} -O ${TAR_FILE}
-   else
-      info "tar file already exists, skip download."
+   step "preparing ${SRC_DIR_NAME} source..."
+
+   # 1. 源码目录已存在，无需下载和解压
+   if [ -d "${SRC_DIR}" ]; then
+      info "source directory already exists, skip download and unpack."
+      success "source ready..."
+      return 0
    fi
-   success "download done..."
+
+   # 2. 压缩包已存在，直接解压
+   if [ -f "${TAR_FILE}" ]; then
+      info "tar file already exists, unpacking..."
+   else
+      # 3. 压缩包不存在，下载
+      info "downloading ${TAR_NAME}..."
+      execute wget ${Q} -c ${DOWNLOAD_LINK} -O ${TAR_FILE}
+   fi
+
+   # 解压
+   execute tar -xjf ${TAR_FILE} -C ${SCRIPT_ABSOLUTE_PATH}
+   success "download and unpack done..."
 }
 
-# 解压源码包到当前目录
+# 解压源码包到当前目录（已由 do_download_src 合并处理，保留接口兼容）
 do_unzip_package() {
     step "start unpacking the ${SRC_DIR_NAME} package ..."
 
@@ -185,15 +232,30 @@ do_build() {
 
     cdi ${SRC_DIR}
 
-    if [ ! -d "${BUILD_DIR}" ]; then
-        execute mkdir -p ${BUILD_DIR}
+    if [ -d "${BUILD_DIR}" ]; then
+        execute rm -rf ${BUILD_DIR}
     fi
 
+    execute mkdir -p ${BUILD_DIR}
     cdi ${BUILD_DIR}
-    execute cmake ${SRC_DIR} \
-        -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
-        -DENABLE_TESTING=Off \
-        -DCMAKE_BUILD_TYPE=Release
+
+    if [ -n "${CROSS_PREFIX}" ]; then
+        info "cross-compiling for ARCH=${ARCH}, using ${CROSS_PREFIX}gcc"
+        execute cmake ${SRC_DIR} \
+            -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
+            -DENABLE_TESTING=Off \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=NO \
+            -DCMAKE_C_COMPILER=${CROSS_PREFIX}gcc \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=arm
+    else
+        execute cmake ${SRC_DIR} \
+            -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
+            -DENABLE_TESTING=Off \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=NO
+    fi
     execute cmake --build . -j$(nproc)
 
     cdo
@@ -239,6 +301,7 @@ do_echo_menu() {
     echo -e "SCRIPT_CURRENT_PATH :${SCRIPT_CURRENT_PATH}"
     echo -e "SCRIPT_ABSOLUTE_PATH:${SCRIPT_ABSOLUTE_PATH}"
     echo -e "INSTALL_PREFIX      :${INSTALL_PREFIX}"
+    echo -e "CROSS_PREFIX        :${CROSS_PREFIX:-local}"
     echo -e "SHELL_PARAM         :($# total) arg=$*"
 	echo ""
 	echo "================================================="
@@ -249,13 +312,11 @@ check_dependencies
 case "${ACTION}" in
     all)
         do_download_src
-        do_unzip_package
         do_build
         do_install
         ;;
     download)
         do_download_src
-        do_unzip_package
         ;;
     build)
         do_build
