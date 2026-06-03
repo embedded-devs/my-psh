@@ -101,7 +101,7 @@ static void psh_read_line(char *buf, size_t size) {
  */
 static void psh_read_password(char *buf, size_t size) {
     struct termios old_term, new_term;
-    int is_tty = isatty(STDIN_FILENO);
+    int            is_tty = isatty(STDIN_FILENO);
 
     /* 仅在终端模式下关闭回显 */
     if (is_tty) {
@@ -145,8 +145,63 @@ static void psh_cmd_help(void) {
     printf("%-32s%s\n", "help", "debug");
 }
 
-/** @fn static int psh_cmd_debug(void)
+/** @fn static void launch_shell(char *p_shell_path)
+ *  @brief 替换当前进程为真正的交互式 shell（不返回）.
+ *  @param[in] p_shell_path 要启动的 shell 可执行文件路径.
+ *  @note  本函数通过 execvp 将当前进程替换为目标 shell，成功则不返回；
+ *         仅当 execvp 失败时才会执行到后续的 perror 和 exit.
+ */
+static void launch_shell(char *p_shell_path) {
+    const char *shell = NULL;   /* 指向 shell 可执行文件路径的指针 */
+    char       *exe_argv[3];    /* execvp 所需的参数数组 */
+
+    /* 参数有效性检查：路径为空则直接返回 */
+    if (p_shell_path == NULL) {
+        return;
+    }
+    shell = p_shell_path;
+
+    /*
+     * 构建传递给 shell 的参数列表（argv）：
+     * exe_argv[0] = shell 程序名（按惯例 argv[0] 为程序自身名称）
+     * exe_argv[1] = "-l"，表示以登录 shell 模式启动。
+     *   -l 参数的作用：让 shell 以 login shell 方式运行，此时 shell 会
+     *   读取并执行 /etc/profile 以及 ~/.profile（或 ~/.bash_profile 等）
+     *   等登录初始化脚本，完成环境变量、PATH、别名等完整初始化，
+     *   确保用户获得一个与正常登录完全一致的 shell 环境。
+     * exe_argv[2] = NULL，参数列表必须以 NULL 结尾
+     */
+    exe_argv[0] = (char *)shell;
+    exe_argv[1] = "-l";
+    exe_argv[2] = NULL;
+
+    /*
+     * 设置环境变量 PSH_AUTH=1，用于向子进程标识当前已通过 psh 认证，
+     * 后续进程可通过检查此变量判断是否处于 psh 授权环境中。
+     */
+    setenv("PSH_AUTH", "1", 1);
+
+    /*
+     * execvp 函数的作用：
+     *   execvp 是 exec 系列函数之一，用于将当前进程的内存映像替换为
+     *   指定程序的新映像。其中：
+     *   - "v" 表示参数以 vector（数组）形式传递；
+     *   - "p" 表示如果 file 参数不包含斜杠，会在 PATH 环境变量指定的
+     *     目录列表中搜索可执行文件。
+     *   调用成功后，当前进程的代码段、数据段、堆栈等全部被新程序替换，
+     *   进程 PID 不变，但程序从 main() 开头重新执行。由于是替换而非创建
+     *   新进程，execvp 成功时不会返回；只有失败时才返回 -1 并设置 errno。
+     */
+    execvp(shell, exe_argv);
+
+    /* 若 execvp 返回，说明执行失败，输出错误信息并退出 */
+    perror("psh: execvp failed");
+    exit(1);
+}
+
+/** @fn static int psh_cmd_debug(char *p_shell_path)
  *  @brief 处理 debug 命令：生成挑战码并提示输入解锁密钥
+ *  @param[in] p_shell_path 解锁成功后启动的 shell 路径（如 /bin/sh），为 NULL 则使用默认值
  *  @return 1 解锁成功，0 解锁失败
  *  @note  流程：
  *         1. 检查是否已锁定
@@ -156,7 +211,7 @@ static void psh_cmd_help(void) {
  *         5. 提示输入 8 字符短密钥
  *         6. 验证密钥，成功则进入调试模式
  */
-static int psh_cmd_debug(void) {
+static int psh_cmd_debug(char *p_shell_path) {
     /* 检查是否已锁定 */
     if (func_unlock_is_locked()) {
         /* 锁定后 debug 命令无任何输出 */
@@ -207,26 +262,11 @@ static int psh_cmd_debug(void) {
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S %Z", tm_info);
         printf("[%s] Bourne-Again Shell (bash)\n\n", time_buf);
 
-        /* 进入调试模式 Shell 循环 */
-        while (1) {
-            psh_print_prompt();
-            char cmd[PSH_CMD_MAX_LEN];
-            psh_read_line(cmd, sizeof(cmd));
-
-            /* 空命令跳过 */
-            if (cmd[0] == '\0') {
-                continue;
-            }
-
-            /* exit 命令退出 */
-            if (strcmp(cmd, "exit") == 0) {
-                break;
-            }
-
-            /* 执行系统命令 */
-            int ret = system(cmd);
-            (void)ret;
+        /* 若未指定 shell 路径，使用默认 /bin/sh */
+        if (p_shell_path == NULL) {
+            p_shell_path = "/bin/sh";
         }
+        launch_shell(p_shell_path);
 
         return 1;
     }
@@ -237,7 +277,7 @@ static int psh_cmd_debug(void) {
 
 /* ========== 公共接口实现 ========== */
 
-void func_psh_run(void) {
+void func_psh_run(int argc, char **argv) {
     /* 初始化解锁模块 */
     if (func_unlock_init() != 0) {
         fprintf(stderr, "Failed to initialize unlock module\n");
@@ -263,9 +303,9 @@ void func_psh_run(void) {
         if (strcmp(cmd, "help") == 0) {
             psh_cmd_help();
         }
-        /* debug 命令 */
+        /* debug 命令：传入命令行参数中指定的 shell 路径（argv[1]） */
         else if (strcmp(cmd, "debug") == 0) {
-            if (psh_cmd_debug()) {
+            if (psh_cmd_debug(argc > 1 ? argv[1] : NULL)) {
                 /* debug 成功解锁后，psh_cmd_debug 内部已处理调试模式 Shell */
                 /* 解锁成功后退出 PSH 循环 */
                 break;

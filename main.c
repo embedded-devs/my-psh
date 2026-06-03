@@ -13,11 +13,7 @@
 #include "src/func_psh.h"
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-
     /* 运行 PSH 受保护 Shell */
-    func_psh_run();
-
+    func_psh_run(argc, argv);
     return 0;
 }
