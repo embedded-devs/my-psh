@@ -114,6 +114,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
         return -1;
     }
 
+    /* 获取文件大小 */
     fseek(fp, 0, SEEK_END);
     file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
@@ -124,6 +125,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
         return -1;
     }
 
+    /* 分配缓冲区：+1 用于末尾 '\0' 终止符（mbedtls 解析需要） */
     pem_buf = (uint8_t *)malloc((size_t)file_size + 1);
     if (pem_buf == NULL) {
         fprintf(stderr, "[UNLOCK] malloc failed\n");
@@ -137,7 +139,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
         free(pem_buf);
         return -1;
     }
-    pem_buf[file_size] = '\0';
+    pem_buf[file_size] = '\0'; /* mbedtls_pk_parse_public_key 需要 NULL 终止 */
     fclose(fp);
 
     /* ===== 2. 解析 PEM 格式公钥 ===== */
@@ -192,7 +194,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
         uint8_t *end = der_start + der_len;
         size_t   seq_len = 0;
 
-        /* 外层 SEQUENCE */
+        /* 解析外层 SEQUENCE 标签 */
         int ret2 = mbedtls_asn1_get_tag(&p, end, &seq_len, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
         if (ret2 != 0) {
             fprintf(stderr, "[UNLOCK] ASN1: failed to parse outer SEQUENCE: -0x%04x\n", (unsigned int)-ret2);
@@ -203,7 +205,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
             return -1;
         }
 
-        /* AlgorithmIdentifier (跳过) */
+        /* 解析并跳过 AlgorithmIdentifier（包含 OID 和可选参数） */
         mbedtls_asn1_buf alg_oid;
         mbedtls_asn1_buf alg_params;
         ret2 = mbedtls_asn1_get_alg(&p, end, &alg_oid, &alg_params);
@@ -216,7 +218,7 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
             return -1;
         }
 
-        /* BIT STRING → 内含 RSAPublicKey */
+        /* 解析 BIT STRING，其内容即为 PKCS#1 格式的 RSAPublicKey */
         mbedtls_asn1_bitstring bs;
         memset(&bs, 0, sizeof(bs));
         ret2 = mbedtls_asn1_get_bitstring(&p, end, &bs);
@@ -234,7 +236,12 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
         rsa_pubkey_len = bs.len;
     }
 
-    /* ===== 4. 导入 PSA 密钥槽 ===== */
+    /* ===== 4. 导入 PSA 密钥槽 =====
+     * 设置密钥属性：
+     *   - 类型：RSA 公钥
+     *   - 用途：仅允许加密（PSA_KEY_USAGE_ENCRYPT）
+     *   - 算法：RSA-OAEP with SHA-256
+     * 导入后 key_id 可用于 psa_asymmetric_encrypt() */
     psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_type(&attr, PSA_KEY_TYPE_RSA_PUBLIC_KEY);
     psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
@@ -258,6 +265,15 @@ static int load_public_key_from_pem(const char *pem_path, psa_key_id_t *key_id) 
 
 /* ========== 公共接口实现 ========== */
 
+/** @fn int func_unlock_init(void)
+ *  @brief 初始化解锁模块（PSA Crypto + 生成随机数 R + 加载 RSA 公钥）
+ *  @return 0 成功，-1 失败
+ *  @note  初始化流程：
+ *         1. 初始化 PSA Crypto 库（仅首次有效，防重复初始化）
+ *         2. 生成 32 字节密码学安全随机数 R（开机一次，重启前不变）
+ *         3. 从 PEM 文件加载 RSA 公钥到 PSA 密钥槽
+ *         4. 重置尝试次数为最大值
+ */
 int func_unlock_init(void) {
     psa_status_t status;
 
@@ -307,6 +323,14 @@ int func_unlock_init(void) {
     return 0;
 }
 
+/** @fn void func_unlock_cleanup(void)
+ *  @brief 清理解锁模块，安全擦除所有敏感数据并释放资源
+ *  @note  清理顺序：
+ *         1. 安全擦除随机数 R（防冷启动攻击）
+ *         2. 销毁 PSA RSA 密钥
+ *         3. 释放 PSA Crypto 库
+ *         4. 重置尝试次数
+ */
 void func_unlock_cleanup(void) {
     /* 安全擦除随机数 R */
     if (s_challenge_ready) {
@@ -330,6 +354,17 @@ void func_unlock_cleanup(void) {
     s_remaining_attempts = UNLOCK_MAX_TRIES;
 }
 
+/** @fn int func_unlock_generate_challenge(char *b64_out, size_t b64_size)
+ *  @brief 生成动态口令：用 RSA-OAEP 公钥加密 R，然后 Base64 编码输出
+ *  @param[out] b64_out  输出 Base64 编码的动态口令字符串缓冲区
+ *  @param[in]  b64_size 输出缓冲区大小（建议 UNLOCK_B64_CHALLENGE_SIZE）
+ *  @return 0 成功，-1 失败
+ *  @note  流程：
+ *         1. 用 RSA-OAEP(SHA-256) 公钥加密 R → 密文（256 字节）
+ *         2. 在密文前拼接 1 字节版本前缀 → 257 字节
+ *         3. Base64 编码 → 约 344 字符动态口令
+ *         OAEP 填充保证：即使 R 相同，每次加密结果也不同
+ */
 int func_unlock_generate_challenge(char *b64_out, size_t b64_size) {
     if (!s_psa_initialized || !s_challenge_ready) {
         fprintf(stderr, "[UNLOCK] not initialized\n");
@@ -380,6 +415,17 @@ int func_unlock_generate_challenge(char *b64_out, size_t b64_size) {
     return 0;
 }
 
+/** @fn int func_unlock_derive_short_key(char *key_out, size_t key_size)
+ *  @brief 从 R 派生 8 字符短密钥（管理端和设备端使用相同算法可得到相同结果）
+ *  @param[out] key_out  输出短密钥缓冲区
+ *  @param[in]  key_size 缓冲区大小（至少 UNLOCK_SHORT_KEY_B64_SIZE）
+ *  @return 0 成功，-1 失败
+ *  @note  派生算法：
+ *         1. 将 R 作为 HMAC 密钥导入 PSA
+ *         2. 计算 HMAC-SHA256(key=R, msg="SHELL-UNLOCK") → 32 字节 MAC
+ *         3. 取前 6 字节 → Base64 编码 → 8 字符短密钥（无 '=' 填充）
+ *         短密钥空间 = 2^48 ≈ 2.8 万亿，配合 5 次尝试限制，暴力破解不可行
+ */
 int func_unlock_derive_short_key(char *key_out, size_t key_size) {
     if (!s_psa_initialized || !s_challenge_ready) {
         fprintf(stderr, "[UNLOCK] not initialized\n");
@@ -391,7 +437,12 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
         return -1;
     }
 
-    /* ===== 步骤 1：将 R 作为 HMAC 密钥导入 PSA ===== */
+    /* ===== 步骤 1：将 R 作为 HMAC 密钥导入 PSA =====
+     * 密钥属性设置：
+     *   - 类型：HMAC 对称密钥
+     *   - 位宽：32 字节 × 8 = 256 位
+     *   - 用途：仅允许签名（PSA_KEY_USAGE_SIGN_MESSAGE）
+     *   - 算法：HMAC-SHA256 */
     psa_key_attributes_t hmac_attr = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_type(&hmac_attr, PSA_KEY_TYPE_HMAC);
     psa_set_key_bits(&hmac_attr, PSA_BYTES_TO_BITS(UNLOCK_CHALLENGE_SIZE));
@@ -439,17 +490,26 @@ int func_unlock_derive_short_key(char *key_out, size_t key_size) {
     return 0;
 }
 
+/** @fn int func_unlock_verify(const char *user_key)
+ *  @brief 验证用户输入的短密钥是否正确
+ *  @param[in] user_key 用户输入的短密钥字符串
+ *  @return 1 验证通过，0 验证失败（密钥错误），-1 已锁定或内部错误
+ *  @note  安全措施：
+ *         - 使用恒定时间比较防止时序攻击
+ *         - 验证通过后立即擦除 R（防止冷启动攻击）
+ *         - 每次失败递减剩余尝试次数，耗尽后锁定
+ */
 int func_unlock_verify(const char *user_key) {
     if (!s_psa_initialized || !s_challenge_ready) {
         return -1;
     }
 
-    /* 已锁定，拒绝验证 */
+    /* 已锁定（尝试次数耗尽），拒绝任何验证请求 */
     if (s_remaining_attempts <= 0) {
         return -1;
     }
 
-    /* 检查输入有效性 */
+    /* 检查输入有效性：空指针或空字符串视为无效输入 */
     if (user_key == NULL || strlen(user_key) == 0) {
         printf("input invaild len param\n");
         s_remaining_attempts--;
@@ -457,35 +517,43 @@ int func_unlock_verify(const char *user_key) {
         return 0;
     }
 
-    /* 从 R 派生期望的短密钥 */
+    /* 从 R 派生期望的短密钥（与设备端算法一致） */
     char expected_key[UNLOCK_SHORT_KEY_B64_SIZE];
     if (func_unlock_derive_short_key(expected_key, sizeof(expected_key)) != 0) {
         return -1;
     }
 
-    /* 恒定时间比较，防止时序攻击 */
+    /* 恒定时间比较，防止通过耗时差异推断密钥内容的时序攻击 */
     int result = constant_time_compare((const uint8_t *)user_key, (const uint8_t *)expected_key, strlen(expected_key));
 
-    /* 安全擦除期望密钥 */
+    /* 立即安全擦除期望密钥，缩短敏感数据在内存中的存活时间 */
     secure_erase(expected_key, sizeof(expected_key));
 
     if (result == 0) {
-        /* 验证通过，擦除 R 防止冷启动攻击 */
+        /* 验证通过：立即擦除 R，防止冷启动攻击提取内存中的核心秘密 */
         secure_erase(s_challenge_R, sizeof(s_challenge_R));
         s_challenge_ready = 0;
         return 1;
     }
 
-    /* 验证失败 */
+    /* 验证失败：递减剩余次数，耗尽后锁定（需重启设备恢复） */
     s_remaining_attempts--;
     printf("Incorrect Password. %d Times Left\n", s_remaining_attempts);
     return 0;
 }
 
+/** @fn int func_unlock_get_remaining_attempts(void)
+ *  @brief 获取剩余解锁尝试次数
+ *  @return 剩余次数（0 表示已锁定）
+ */
 int func_unlock_get_remaining_attempts(void) {
     return s_remaining_attempts;
 }
 
+/** @fn int func_unlock_is_locked(void)
+ *  @brief 检查解锁模块是否已锁定（尝试次数耗尽）
+ *  @return 1 已锁定，0 未锁定
+ */
 int func_unlock_is_locked(void) {
     return s_remaining_attempts <= 0 ? 1 : 0;
 }
