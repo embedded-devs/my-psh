@@ -66,6 +66,19 @@ static void psh_print_banner(void) {
     printf("Enter 'help' for a list of davinci system commands.\n");
 }
 
+/** @fn static void psh_print_shell_banner(void)
+ *  @brief 打印正常 Shell 的横幅信息（解锁成功后显示）
+ *  @note  显示当前时间和 Bourne-Again Shell 标识，提示用户已进入正常 shell 环境
+ */
+static void psh_print_shell_banner(void) {
+    printf("Enter BASH Mode.\n\n");
+    time_t     now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char       time_buf[64];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S %Z", tm_info);
+    printf("[%s] Bourne-Again Shell (bash)\n\n", time_buf);
+}
+
 /** @fn static void psh_print_prompt(void)
  *  @brief 打印命令提示符 "# "
  */
@@ -74,15 +87,16 @@ static void psh_print_prompt(void) {
     fflush(stdout);
 }
 
-/** @fn static void psh_read_line(char *buf, size_t size)
+/** @fn static int psh_read_line(char *buf, size_t size)
  *  @brief 从标准输入读取一行（去除末尾换行符）
  *  @param[out] buf  输出缓冲区
  *  @param[in]  size 缓冲区大小
+ *  @return 0 成功读取，-1 EOF（输入结束）
  */
-static void psh_read_line(char *buf, size_t size) {
+static int psh_read_line(char *buf, size_t size) {
     if (fgets(buf, (int)size, stdin) == NULL) {
         buf[0] = '\0';
-        return;
+        return -1;
     }
 
     /* 去除末尾换行符 */
@@ -90,6 +104,7 @@ static void psh_read_line(char *buf, size_t size) {
     if (len > 0 && buf[len - 1] == '\n') {
         buf[len - 1] = '\0';
     }
+    return 0;
 }
 
 /** @fn static void psh_read_password(char *buf, size_t size)
@@ -142,22 +157,27 @@ static void psh_read_password(char *buf, size_t size) {
  */
 static void psh_cmd_help(void) {
     printf("Support Commands:\n");
-    printf("%-32s%s\n", "help", "debug");
+    printf("  %-10s%s\n", "help", "Show this help message");
+    printf("  %-10s%s\n", "debug", "Generate challenge code for unlock");
+    printf("  %-10s%s\n", "exit", "Exit PSH (alias: quit)");
 }
 
-/** @fn static void launch_shell(char *p_shell_path)
- *  @brief 替换当前进程为真正的交互式 shell（不返回）.
+/** @fn static int launch_shell(char *p_shell_path)
+ *  @brief 替换当前进程为真正的交互式 shell.
  *  @param[in] p_shell_path 要启动的 shell 可执行文件路径.
+ *  @return 成功时不返回（进程已被替换），失败返回 -1.
  *  @note  本函数通过 execvp 将当前进程替换为目标 shell，成功则不返回；
- *         仅当 execvp 失败时才会执行到后续的 perror 和 exit.
+ *         失败时返回 -1，由调用方决定后续处理（如清理资源后退出），
+ *         而非在此处直接 exit，确保上层可执行资源回收。
  */
-static void launch_shell(char *p_shell_path) {
+static int launch_shell(char *p_shell_path) {
     const char *shell = NULL;   /* 指向 shell 可执行文件路径的指针 */
     char       *exe_argv[3];    /* execvp 所需的参数数组 */
 
-    /* 参数有效性检查：路径为空则直接返回 */
+    /* 参数有效性检查：路径为空则返回错误 */
     if (p_shell_path == NULL) {
-        return;
+        fprintf(stderr, "psh: shell path is NULL\n");
+        return -1;
     }
     shell = p_shell_path;
 
@@ -194,9 +214,9 @@ static void launch_shell(char *p_shell_path) {
      */
     execvp(shell, exe_argv);
 
-    /* 若 execvp 返回，说明执行失败，输出错误信息并退出 */
+    /* 若 execvp 返回，说明执行失败，输出错误信息并返回 -1 */
     perror("psh: execvp failed");
-    exit(1);
+    return -1;
 }
 
 /** @fn static int psh_cmd_debug(char *p_shell_path)
@@ -253,20 +273,17 @@ static int psh_cmd_debug(char *p_shell_path) {
 
     if (result == 1) {
         /* ===== 解锁成功，进入正常Shell ===== */
-        printf("Enter BASH Mode.\n\n");
-
-        /* 打印正常 Shell 横幅 */
-        time_t     now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        char       time_buf[64];
-        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S %Z", tm_info);
-        printf("[%s] Bourne-Again Shell (bash)\n\n", time_buf);
+        psh_print_shell_banner();
 
         /* 若未指定 shell 路径，使用默认 /bin/sh */
         if (p_shell_path == NULL) {
             p_shell_path = "/bin/sh";
         }
-        launch_shell(p_shell_path);
+
+        /* 启动目标 shell，成功则进程被替换不返回；失败则返回 -1 由上层清理退出 */
+        if (launch_shell(p_shell_path) != 0) {
+            return -1;
+        }
 
         return 1;
     }
@@ -292,7 +309,11 @@ void func_psh_run(int argc, char **argv) {
         psh_print_prompt();
 
         char cmd[PSH_CMD_MAX_LEN];
-        psh_read_line(cmd, sizeof(cmd));
+        /* 检测 EOF（stdin 关闭，如 Ctrl+D 或管道输入结束），退出循环 */
+        if (psh_read_line(cmd, sizeof(cmd)) != 0) {
+            printf("\n");
+            break;
+        }
 
         /* 空命令跳过 */
         if (cmd[0] == '\0') {
@@ -303,15 +324,23 @@ void func_psh_run(int argc, char **argv) {
         if (strcmp(cmd, "help") == 0) {
             psh_cmd_help();
         }
+        /* exit/quit 命令：主动退出 PSH */
+        else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
+            break;
+        }
         /* debug 命令：传入命令行参数中指定的 shell 路径（argv[1]） */
         else if (strcmp(cmd, "debug") == 0) {
-            if (psh_cmd_debug(argc > 1 ? argv[1] : NULL)) {
-                /* debug 成功解锁后，psh_cmd_debug 内部已处理调试模式 Shell */
-                /* 解锁成功后退出 PSH 循环 */
+            int ret = psh_cmd_debug(argc > 1 ? argv[1] : NULL);
+            if (ret == 1) {
+                /* 解锁成功，launch_shell 已替换进程（正常不会到达此处） */
                 break;
             }
-            /* 解锁失败，继续 PSH 循环 */
-            continue;
+            else if (ret == -1) {
+                /* launch_shell 执行失败，清理资源后退出 */
+                fprintf(stderr, "psh: failed to launch shell\n");
+                break;
+            }
+            /* ret == 0：解锁失败，继续 PSH 循环 */
         }
         /* 不支持的命令 */
         else {
