@@ -200,10 +200,54 @@ psh/
 
 ### 1. 嵌入 Linux 设备
 
-- **BusyBox init**：在 `/etc/inittab` 中添加 `::respawn:-/bin/psh`
-- **systemd**：创建 `psh.service`，设置 `Restart=always` 和 `StandardInput=tty`
-- 将 `psh` 可执行文件及 `keys/public_key.pem` 部署至设备对应路径
-- 可通过环境变量 `UNLOCK_PUBKEY_PATH` 覆盖公钥路径，无需重新编译
+部署前先将 `psh` 可执行文件及 `keys/public_key.pem` 拷贝至根文件系统对应路径（如 `/bin/psh`、`/etc/psh/public_key.pem`），并可通过环境变量 `UNLOCK_PUBKEY_PATH` 覆盖公钥路径，无需重新编译。
+
+#### 1.1 BusyBox init
+
+BusyBox 的登录 Shell 由 `/etc/passwd` 中目标用户最后一个字段决定，因此部署 psh 即"把登录 Shell 指向 psh"。下面按两种方式分别说明部署与取消步骤，修改后均需重启设备生效。
+
+##### 1.1.1 方式一：修改登录 Shell 字段（推荐）
+
+【**部署**】
+
+修改 `/etc/passwd`，将 root（或目标用户）的登录 Shell 改为 `/bin/psh`：
+
+```text
+# /etc/passwd
+root:x:0:0:root:/home/root:/bin/psh
+```
+
+再在 `/etc/inittab` 中为串口配置自动登录，开机即进入 psh 受限环境：
+
+```text
+# /etc/inittab
+mxc0:12345:respawn:/sbin/getty -l /bin/autologin -n -L 115200 ttymxc0
+```
+
+其中 `/bin/autologin` 内部执行 `login -f root` 完成免密登录，`login` 读取 `/etc/passwd` 后启动 psh。
+
+【**取消**】
+
+将 `/etc/passwd` 中目标用户最后一个字段改回 `/bin/sh` 或 `/bin/bash`，重启后恢复普通 Shell。
+
+##### 1.1.2 方式二：直接 respawn
+
+【**部署**】
+
+跳过 login 流程，直接在 `/etc/inittab` 中 respawn psh：
+
+```text
+# /etc/inittab
+::respawn:-/bin/psh
+```
+
+【**取消**】
+
+删除或注释 `/etc/inittab` 中 `::respawn:-/bin/psh` 一行，恢复原有 `getty` 配置，重启后生效。
+
+#### 1.2 systemd
+
+创建 `psh.service`，设置 `Restart=always` 和 `StandardInput=tty`，作为指定 tty 上的登录服务启动。
 
 ### 2. RSA 密钥位数升级
 
